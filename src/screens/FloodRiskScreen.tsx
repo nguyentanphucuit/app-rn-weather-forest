@@ -5,6 +5,7 @@ import {COLORS} from '../utils/colors';
 import {SPACING, FONT_SIZE, BORDER_RADIUS} from '../utils/constants';
 import {useLocation} from '../providers/LocationProvider';
 import {API_ENDPOINTS, isApiEnabled, fetchWithTimeout} from '../utils/apiConfig';
+import {loadVietnamProvinces, getProvinceByLocationId, getProvinceByCoordinates} from '../utils/vietnamProvinces';
 
 interface FloodRiskData {
   location_id: string;
@@ -30,11 +31,16 @@ export const FloodRiskScreen: React.FC = () => {
   const [floodRiskData, setFloodRiskData] = useState<FloodRiskData[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedRisk, setSelectedRisk] = useState<string | null>(null);
+  const [provincesLoaded, setProvincesLoaded] = useState(false);
 
   useEffect(() => {
     const loadFloodRiskData = async () => {
       try {
         setLoading(true);
+        
+        // Load provinces trước để có thể map tọa độ sang tên
+        await loadVietnamProvinces();
+        setProvincesLoaded(true);
         
         // Thử gọi API trước
         if (isApiEnabled()) {
@@ -117,16 +123,42 @@ export const FloodRiskScreen: React.FC = () => {
     }
   };
 
+  // Lấy tên địa điểm từ location_id hoặc tọa độ
+  const getLocationName = (item: FloodRiskData): string => {
+    if (!provincesLoaded) {
+      return `${item.lat.toFixed(1)}, ${item.lon.toFixed(1)}`;
+    }
+    
+    // Thử tìm theo location_id trước
+    const provinceById = getProvinceByLocationId(item.location_id);
+    if (provinceById) {
+      return provinceById.nameEn;
+    }
+    
+    // Nếu không tìm thấy, tìm theo tọa độ
+    const provinceByCoords = getProvinceByCoordinates(item.lat, item.lon);
+    if (provinceByCoords) {
+      return provinceByCoords.nameEn;
+    }
+    
+    // Fallback về tọa độ nếu không tìm thấy
+    return `${item.lat.toFixed(1)}, ${item.lon.toFixed(1)}`;
+  };
+
   const renderRiskItem = ({item}: {item: FloodRiskData}) => {
     const riskColor = getRiskColor(item.risk_level);
     const isCurrentLocation = item.location_id === location?.location_id;
+    const locationName = getLocationName(item);
 
     return (
       <View style={[styles.riskCard, isCurrentLocation && styles.riskCardCurrent]}>
         <View style={styles.riskHeader}>
           <View style={styles.locationInfo}>
+            <Text style={styles.locationName}>
+              {locationName}
+            </Text>
             <Text style={styles.locationCoords}>
-              {item.lat.toFixed(1)}, {item.lon.toFixed(1)}
+              {item.lat.toFixed(4)}, {item.lon.toFixed(4)}
             </Text>
             {isCurrentLocation && (
               <View style={styles.currentBadge}>
@@ -479,10 +511,16 @@ const styles = StyleSheet.create({
   locationInfo: {
     flex: 1,
   },
-  locationCoords: {
+  locationName: {
     fontSize: FONT_SIZE.md,
     color: COLORS.text,
     fontWeight: '700',
+    marginBottom: SPACING.xs / 2,
+  },
+  locationCoords: {
+    fontSize: FONT_SIZE.xs,
+    color: COLORS.textSecondary,
+    fontWeight: '500',
     marginBottom: SPACING.xs,
   },
   currentBadge: {

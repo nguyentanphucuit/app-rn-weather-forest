@@ -30,13 +30,21 @@ module.exports = {
       permissions: [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION"
-      ]
+      ],
+      useNextNotificationsApi: true
     },
     plugins: [
       [
         "expo-location",
         {
           locationAlwaysAndWhenInUsePermission: "We need your location to provide accurate weather forecasts."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          color: "#007AFF",
+          sounds: []
         }
       ]
     ]

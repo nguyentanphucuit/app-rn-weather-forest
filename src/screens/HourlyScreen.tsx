@@ -1,5 +1,5 @@
 import React, {useState, useEffect, useRef} from 'react';
-import {View, Text, StyleSheet, FlatList, TouchableOpacity, Dimensions, ScrollView} from 'react-native';
+import {View, Text, StyleSheet, FlatList, TouchableOpacity, Dimensions, ScrollView, Modal, Alert} from 'react-native';
 import {useWeather} from '../providers/WeatherProvider';
 import {useLocation} from '../providers/LocationProvider';
 import {LoadingSpinner} from '../components/LoadingSpinner';
@@ -27,12 +27,15 @@ interface TimeseriesStep {
 const DEFAULT_LOCATION_ID = '400a5792-7432-4ab5-a280-97dd91b21621';
 
 export const HourlyScreen: React.FC = () => {
-  const {weatherData, loading, temperatureUnit} = useWeather();
+  const {weatherData, loading} = useWeather();
   const {location} = useLocation();
   const [timeseriesSteps, setTimeseriesSteps] = useState<TimeseriesStep[]>([]);
   const [loadingTimeseries, setLoadingTimeseries] = useState(true);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [selectedModel, setSelectedModel] = useState<ModelProvider>('XGBoost');
+  const [showDateTimePicker, setShowDateTimePicker] = useState(false);
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [selectedTime, setSelectedTime] = useState<string | null>(null);
   const flatListRef = useRef<FlatList>(null);
 
   useEffect(() => {
@@ -161,13 +164,206 @@ export const HourlyScreen: React.FC = () => {
     setCurrentIndex(currentStepIndex);
   };
 
+  // Sắp xếp tất cả steps theo thời gian (cần định nghĩa trước để dùng trong handleSearchDateTime)
+  const allSteps = timeseriesSteps.length > 0 
+    ? timeseriesSteps 
+    : (weatherData?.hourly || []).map(forecast => ({
+        valid_at: forecast.time,
+        source: 'fcst',
+        temp_c: forecast.temperature,
+        wind_ms: forecast.windSpeed / 3.6,
+        precip_mm: forecast.precipitation,
+        rel_humidity_pct: forecast.humidity,
+        wind_dir_deg: null,
+        cloudcover_pct: null,
+        surface_pressure_hpa: null,
+      }));
+
+  // Lấy min/max date từ allSteps
+  const getMinMaxDates = () => {
+    if (allSteps.length === 0) return {min: new Date(), max: new Date()};
+    const dates = allSteps.map(step => new Date(step.valid_at));
+    return {
+      min: new Date(Math.min(...dates.map(d => d.getTime()))),
+      max: new Date(Math.max(...dates.map(d => d.getTime()))),
+    };
+  };
+
+  // const {min: minDate, max: maxDate} = getMinMaxDates(); // Reserved for future use
+
+  // Lấy danh sách các ngày unique từ allSteps
+  const getUniqueDates = () => {
+    const dateMap = new Map<string, string>();
+    allSteps.forEach(step => {
+      const date = new Date(step.valid_at);
+      const dateKey = date.toLocaleDateString('vi-VN', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+      });
+      const dateLabel = date.toLocaleDateString('vi-VN', {
+        weekday: 'long',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+      });
+      if (!dateMap.has(dateKey)) {
+        dateMap.set(dateKey, dateLabel);
+      }
+    });
+    return Array.from(dateMap.entries()).sort((a, b) => {
+      const dateA = new Date(a[0].split('/').reverse().join('-'));
+      const dateB = new Date(b[0].split('/').reverse().join('-'));
+      return dateA.getTime() - dateB.getTime();
+    });
+  };
+
+  // Lấy danh sách các giờ có sẵn trong ngày đã chọn
+  const getAvailableTimes = (dateStr: string) => {
+    return allSteps
+      .filter(step => {
+        const stepDate = new Date(step.valid_at);
+        const stepDateStr = stepDate.toLocaleDateString('vi-VN', {
+          day: '2-digit',
+          month: '2-digit',
+          year: 'numeric',
+        });
+        return stepDateStr === dateStr;
+      })
+      .map(step => {
+        const stepDate = new Date(step.valid_at);
+        return {
+          time: stepDate.toLocaleTimeString('vi-VN', {
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+          }),
+          valid_at: step.valid_at,
+        };
+      })
+      .sort((a, b) => a.time.localeCompare(b.time));
+  };
+
+  // Tìm kiếm theo ngày và giờ đã chọn
+  const handleSearchDateTime = () => {
+    if (!selectedDate || !selectedTime) {
+      Alert.alert('Lỗi', 'Vui lòng chọn cả ngày và giờ');
+      return;
+    }
+
+    // Tìm step chính xác với ngày và giờ đã chọn
+    const targetIndex = allSteps.findIndex(step => {
+      const stepDate = new Date(step.valid_at);
+      const stepDateStr = stepDate.toLocaleDateString('vi-VN', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+      });
+      const stepTime = stepDate.toLocaleTimeString('vi-VN', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      });
+      return stepDateStr === selectedDate && stepTime === selectedTime;
+    });
+
+    if (targetIndex >= 0) {
+      setShowDateTimePicker(false);
+      setTimeout(() => {
+        flatListRef.current?.scrollToIndex({
+          index: targetIndex,
+          animated: true,
+        });
+        setCurrentIndex(targetIndex);
+      }, 100);
+    } else {
+      Alert.alert(
+        'Không tìm thấy',
+        'Không có dữ liệu cho thời gian đã chọn. Vui lòng chọn thời gian khác.',
+      );
+    }
+  };
+
+  const uniqueDates = getUniqueDates();
+  const availableTimes = selectedDate ? getAvailableTimes(selectedDate) : [];
+
+  const isFiniteNum = (v: unknown): v is number =>
+    typeof v === 'number' && Number.isFinite(v);
+
+  const clamp01 = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
+
+  const getIsNight = (iso: string) => {
+    const d = new Date(iso);
+    const h = d.getHours(); // local time
+    return h >= 18 || h < 6;
+  };
+
+  const buildCloudRainIcon = (step: TimeseriesStep) => {
+    // cloudPct: 0..100, null => thiếu dữ liệu
+    const cloudPct = isFiniteNum(step.cloudcover_pct)
+      ? clamp01(step.cloudcover_pct, 0, 100)
+      : null;
+
+    // hasRain: giống logic web, "có mưa" khi precip_mm > 0 (có thể nâng ngưỡng nếu cần)
+    const hasRain = isFiniteNum(step.precip_mm) && step.precip_mm > 0;
+
+    const isNight = getIsNight(step.valid_at);
+
+    // Nếu thiếu dữ liệu mây: vẫn ưu tiên mưa trước (nếu có), còn không thì unknown
+    if (cloudPct === null) {
+      if (hasRain) {
+        return { icon: '🌧️', condition: isNight ? 'Mưa đêm' : 'Có mưa' };
+      }
+      return { icon: '❔', condition: 'Không có dữ liệu mây' };
+    }
+
+    // --- Mapping giống web ---
+    // Web: default sun; nếu isNight -> moon (ở nhánh cuối)
+    // Web: if (hasRain && 30<=cloud<=80) -> cloud-sun-rain / cloud-moon-rain
+    if (hasRain && cloudPct >= 30 && cloudPct <= 80) {
+      return {
+        icon: isNight ? '🌧️' : '🌦️', // "cloud-moon-rain" vs "cloud-sun-rain"
+        condition: 'Mưa rải rác',
+      };
+    }
+
+    // Web: else if (hasRain) -> heavy showers
+    if (hasRain) {
+      return {
+        icon: '⛈️', // "cloud-showers-heavy"
+        condition: 'Mưa lớn',
+      };
+    }
+
+    // Web: else if (!hasRain && cloudPct > 80) -> cloud
+    if (!hasRain && cloudPct > 80) {
+      return {
+        icon: '☁️',
+        condition: 'U ám',
+      };
+    }
+
+    // Web: else if (!hasRain && cloudPct >= 30) -> cloud-sun / cloud-moon
+    if (!hasRain && cloudPct >= 30) {
+      return {
+        icon: isNight ? '☁️' : '⛅', // "cloud-moon" vs "cloud-sun" - dùng ☁️ cho đêm để tránh emoji kép
+        condition: cloudPct >= 60 ? 'Nhiều mây' : 'Có mây',
+      };
+    }
+
+    // Web: else -> moon or sun
+    return {
+      icon: isNight ? '🌙' : '☀️',
+      condition: 'Trời quang',
+    };
+  };
+
   // Render mỗi giờ
   const renderHour = ({item: step, index}: {item: TimeseriesStep; index: number}) => {
     const date = new Date(step.valid_at);
     const isObs = step.source === 'obs';
     const isCurrent = step.valid_at === currentStep?.valid_at;
-    const condition = step.cloudcover_pct && step.cloudcover_pct > 50 ? 'Nhiều mây' : 'Ít mây';
-    const icon = step.cloudcover_pct && step.cloudcover_pct > 50 ? '☁️' : '⛅';
+    const { icon, condition } = buildCloudRainIcon(step);
     const dayNames = ['Chủ nhật', 'Thứ 2', 'Thứ 3', 'Thứ 4', 'Thứ 5', 'Thứ 6', 'Thứ 7'];
     const dayName = dayNames[date.getDay()];
     const dateStr = date.toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' });
@@ -190,7 +386,7 @@ export const HourlyScreen: React.FC = () => {
           </View>
           <View style={[styles.pageIndicatorBadge, isCurrent && styles.pageIndicatorBadgeCurrent]}>
             <Text style={[styles.pageIndicator, isCurrent && styles.pageIndicatorCurrent]}>
-              {index + 1}/{timeseriesSteps.length}
+              {index + 1}/{allSteps.length}
             </Text>
           </View>
         </View>
@@ -275,26 +471,23 @@ export const HourlyScreen: React.FC = () => {
     );
   };
 
-  // Sắp xếp tất cả steps theo thời gian
-  const allSteps = timeseriesSteps.length > 0 
-    ? timeseriesSteps 
-    : (weatherData?.hourly || []).map(forecast => ({
-        valid_at: forecast.time,
-        source: 'fcst',
-        temp_c: forecast.temperature,
-        wind_ms: forecast.windSpeed / 3.6,
-        precip_mm: forecast.precipitation,
-        rel_humidity_pct: forecast.humidity,
-        wind_dir_deg: null,
-        cloudcover_pct: null,
-        surface_pressure_hpa: null,
-      }));
 
   return (
     <View style={styles.container}>
       {/* Model selector */}
       <View style={styles.modelSelectorContainer}>
-        <Text style={styles.modelSelectorTitle}>Model Provider</Text>
+        <View style={styles.modelSelectorHeader}>
+          <Text style={styles.modelSelectorTitle}>Model Provider</Text>
+          <TouchableOpacity
+            style={styles.dateTimeButton}
+            onPress={() => {
+              setSelectedDate(null);
+              setSelectedTime(null);
+              setShowDateTimePicker(true);
+            }}>
+            <Text style={styles.dateTimeButtonText}>📅 Tìm theo ngày/giờ</Text>
+          </TouchableOpacity>
+        </View>
         <ScrollView 
           horizontal 
           showsHorizontalScrollIndicator={false}
@@ -357,6 +550,90 @@ export const HourlyScreen: React.FC = () => {
           <Text style={styles.scrollToCurrentText}>Hiện tại</Text>
         </TouchableOpacity>
       )}
+
+      {/* Modal chọn ngày/giờ */}
+      <Modal
+        visible={showDateTimePicker}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowDateTimePicker(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Tìm kiếm theo ngày/giờ</Text>
+              <TouchableOpacity
+                onPress={() => setShowDateTimePicker(false)}
+                style={styles.modalCloseButton}>
+                <Text style={styles.modalCloseText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={false}>
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>📅 Chọn ngày</Text>
+                <View style={styles.dateListContainer}>
+                  {uniqueDates.map(([dateKey, dateLabel]) => (
+                    <TouchableOpacity
+                      key={dateKey}
+                      style={[
+                        styles.dateItem,
+                        selectedDate === dateKey && styles.dateItemSelected,
+                      ]}
+                      onPress={() => {
+                        setSelectedDate(dateKey);
+                        setSelectedTime(null); // Reset time khi chọn ngày mới
+                      }}>
+                      <Text
+                        style={[
+                          styles.dateItemText,
+                          selectedDate === dateKey && styles.dateItemTextSelected,
+                        ]}>
+                        {dateLabel}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+
+              {selectedDate && (
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>⏰ Chọn giờ</Text>
+                  <View style={styles.timeListContainer}>
+                    {availableTimes.map((timeItem, index) => (
+                      <TouchableOpacity
+                        key={`${timeItem.time}-${index}`}
+                        style={[
+                          styles.timeItem,
+                          selectedTime === timeItem.time && styles.timeItemSelected,
+                        ]}
+                        onPress={() => setSelectedTime(timeItem.time)}>
+                        <Text
+                          style={[
+                            styles.timeItemText,
+                            selectedTime === timeItem.time && styles.timeItemTextSelected,
+                          ]}>
+                          {timeItem.time}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+              )}
+
+              <TouchableOpacity
+                style={[
+                  styles.searchButton,
+                  (!selectedDate || !selectedTime) && styles.searchButtonDisabled,
+                ]}
+                onPress={handleSearchDateTime}
+                disabled={!selectedDate || !selectedTime}>
+                <Text style={styles.searchButtonText}>🔍 Tìm kiếm</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
     </View>
   );
 };
@@ -580,11 +857,27 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
+  modelSelectorHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: SPACING.sm,
+  },
   modelSelectorTitle: {
     fontSize: FONT_SIZE.sm,
     color: COLORS.textSecondary,
     fontWeight: '600',
-    marginBottom: SPACING.sm,
+  },
+  dateTimeButton: {
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.xs,
+    borderRadius: BORDER_RADIUS.md,
+  },
+  dateTimeButtonText: {
+    color: COLORS.textDark,
+    fontSize: FONT_SIZE.sm,
+    fontWeight: '600',
   },
   modelButtonsContainer: {
     flexDirection: 'row',
@@ -613,6 +906,156 @@ const styles = StyleSheet.create({
   },
   modelButtonTextActive: {
     color: COLORS.primary,
+    fontWeight: '700',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: COLORS.cardBackground,
+    borderTopLeftRadius: BORDER_RADIUS.xl,
+    borderTopRightRadius: BORDER_RADIUS.xl,
+    paddingTop: SPACING.md,
+    paddingBottom: SPACING.xl,
+    maxHeight: SCREEN_HEIGHT * 0.85,
+    height: SCREEN_HEIGHT * 0.85,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: SPACING.md,
+    paddingBottom: SPACING.md,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  modalTitle: {
+    fontSize: FONT_SIZE.lg,
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  modalCloseButton: {
+    padding: SPACING.xs,
+  },
+  modalCloseText: {
+    fontSize: FONT_SIZE.xl,
+    color: COLORS.textSecondary,
+    fontWeight: '300',
+  },
+  modalBody: {
+    paddingHorizontal: SPACING.md,
+    paddingTop: SPACING.md,
+    flex: 1,
+    maxHeight: SCREEN_HEIGHT * 0.7,
+  },
+  dateListContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: SPACING.sm,
+    marginTop: SPACING.xs,
+  },
+  dateItem: {
+    backgroundColor: COLORS.background,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: BORDER_RADIUS.md,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    minWidth: '45%',
+  },
+  dateItemSelected: {
+    backgroundColor: COLORS.primary + '20',
+    borderColor: COLORS.primary,
+    borderWidth: 2,
+  },
+  dateItemText: {
+    fontSize: FONT_SIZE.sm,
+    color: COLORS.text,
+    fontWeight: '500',
+    textAlign: 'center',
+  },
+  dateItemTextSelected: {
+    color: COLORS.primary,
+    fontWeight: '700',
+  },
+  timeListContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: SPACING.sm,
+    marginTop: SPACING.xs,
+  },
+  timeItem: {
+    backgroundColor: COLORS.background,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: BORDER_RADIUS.md,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    minWidth: '20%',
+  },
+  timeItemSelected: {
+    backgroundColor: COLORS.primary + '20',
+    borderColor: COLORS.primary,
+    borderWidth: 2,
+  },
+  timeItemText: {
+    fontSize: FONT_SIZE.sm,
+    color: COLORS.text,
+    fontWeight: '500',
+    textAlign: 'center',
+  },
+  timeItemTextSelected: {
+    color: COLORS.primary,
+    fontWeight: '700',
+  },
+  inputGroup: {
+    marginBottom: SPACING.lg,
+  },
+  inputLabel: {
+    fontSize: FONT_SIZE.sm,
+    color: COLORS.text,
+    fontWeight: '600',
+    marginBottom: SPACING.xs,
+  },
+  pickerButton: {
+    backgroundColor: COLORS.background,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: BORDER_RADIUS.md,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.md,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  pickerButtonText: {
+    fontSize: FONT_SIZE.md,
+    color: COLORS.text,
+    fontWeight: '600',
+  },
+  pickerButtonIcon: {
+    fontSize: FONT_SIZE.lg,
+  },
+  inputHint: {
+    fontSize: FONT_SIZE.xs,
+    color: COLORS.textSecondary,
+    marginTop: SPACING.xs,
+  },
+  searchButton: {
+    backgroundColor: COLORS.primary,
+    paddingVertical: SPACING.md,
+    borderRadius: BORDER_RADIUS.md,
+    alignItems: 'center',
+    marginTop: SPACING.md,
+  },
+  searchButtonDisabled: {
+    opacity: 0.5,
+  },
+  searchButtonText: {
+    color: COLORS.textDark,
+    fontSize: FONT_SIZE.md,
     fontWeight: '700',
   },
 });

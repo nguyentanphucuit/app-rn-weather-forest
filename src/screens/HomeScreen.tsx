@@ -1,5 +1,5 @@
 import React from 'react';
-import {View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity} from 'react-native';
+import {View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity, Alert} from 'react-native';
 import {useWeather} from '../providers/WeatherProvider';
 import {useAlerts} from '../providers/AlertProvider';
 import {useLocation} from '../providers/LocationProvider';
@@ -14,6 +14,12 @@ import {LocationSearchModal} from '../components/LocationSearchModal';
 import {COLORS} from '../utils/colors';
 import {SPACING, FONT_SIZE, BORDER_RADIUS} from '../utils/constants';
 import {formatWindSpeed, formatPrecipitation} from '../utils/formatters';
+import {
+  scheduleNotification,
+  sendWeatherAlertNotification,
+  cancelAllScheduledNotifications,
+  getScheduledNotificationsCount,
+} from '../utils/notificationService';
 
 export const HomeScreen: React.FC = () => {
   const {weatherData, loading, error, refreshWeather, temperatureUnit} = useWeather();
@@ -21,6 +27,8 @@ export const HomeScreen: React.FC = () => {
   const {location, updateLocation, requestLocation} = useLocation();
   const [refreshing, setRefreshing] = React.useState(false);
   const [showLocationModal, setShowLocationModal] = React.useState(false);
+  const [testNotificationScheduled, setTestNotificationScheduled] = React.useState(false);
+  const [resetting, setResetting] = React.useState(false);
 
   const onRefresh = React.useCallback(async () => {
     setRefreshing(true);
@@ -63,6 +71,120 @@ export const HomeScreen: React.FC = () => {
     updateLocation(selectedLocation);
   };
 
+  const handleTestNotification = async () => {
+    try {
+      // Lấy cảnh báo đầu tiên nếu có, nếu không thì dùng dữ liệu mẫu
+      const testAlert = activeAlerts.length > 0 
+        ? activeAlerts[0]
+        : {
+            id: 'test-alert',
+            title: 'Cảnh báo mưa lớn',
+            description: 'Dự báo có mưa lớn kèm gió mạnh trong vòng 2 giờ tới. Người dân cần chú ý và hạn chế di chuyển.',
+            severity: 'moderate' as const,
+            type: 'rain' as const,
+            startTime: new Date(Date.now() + 7200000).toISOString(), // 2 giờ sau
+            endTime: new Date(Date.now() + 10800000).toISOString(), // 3 giờ sau
+            area: 'Hà Nội và các tỉnh lân cận',
+            urgency: 'expected' as const,
+          };
+
+      // Sử dụng sendWeatherAlertNotification để format giống AlertCard
+      // Nhưng vì cần schedule sau 10s, nên format thủ công
+      const {getAlertUrgencyText} = await import('../utils/formatters');
+      const urgencyText = getAlertUrgencyText(testAlert);
+      
+      // Format giống AlertCard: [SEVERITY] Title
+      const severityText = testAlert.severity.toUpperCase();
+      const severityEmoji = {
+        extreme: '🔴',
+        severe: '🟠',
+        moderate: '🟡',
+        minor: '🟢',
+      };
+      const emoji = severityEmoji[testAlert.severity] || '⚠️';
+      
+      const notificationId = await scheduleNotification(
+        `${emoji} [${severityText}] ${testAlert.title}`,
+        `${testAlert.description}\n\n📍 ${testAlert.area}\n⏰ ${urgencyText}`,
+        10, // Sau 10 giây
+        {
+          type: 'weather_alert',
+          alertId: testAlert.id,
+          severity: testAlert.severity,
+          area: testAlert.area,
+          urgency: testAlert.urgency,
+        },
+      );
+
+      if (notificationId) {
+        setTestNotificationScheduled(true);
+        Alert.alert(
+          'Thông báo đã lên lịch',
+          'Thông báo test sẽ hiển thị sau 10 giây. Hãy đợi và kiểm tra thông báo trên thiết bị của bạn.',
+          [{text: 'OK'}],
+        );
+        
+        // Reset sau 15 giây để có thể test lại
+        setTimeout(() => {
+          setTestNotificationScheduled(false);
+        }, 15000);
+      } else {
+        Alert.alert(
+          'Lỗi',
+          'Không thể lên lịch thông báo. Vui lòng kiểm tra quyền thông báo trong cài đặt.',
+          [{text: 'OK'}],
+        );
+      }
+    } catch (error) {
+      console.error('Lỗi khi test notification:', error);
+      Alert.alert(
+        'Lỗi',
+        'Đã xảy ra lỗi khi lên lịch thông báo.',
+        [{text: 'OK'}],
+      );
+    }
+  };
+
+  const handleResetNotifications = async () => {
+    try {
+      // Xác nhận trước khi reset
+      Alert.alert(
+        'Reset thông báo',
+        'Bạn có chắc muốn hủy tất cả thông báo đã lên lịch?',
+        [
+          {text: 'Hủy', style: 'cancel'},
+          {
+            text: 'Reset',
+            style: 'destructive',
+            onPress: async () => {
+              setResetting(true);
+              try {
+                const count = await getScheduledNotificationsCount();
+                await cancelAllScheduledNotifications();
+                Alert.alert(
+                  'Đã reset',
+                  `Đã hủy ${count} thông báo đã lên lịch.`,
+                  [{text: 'OK'}],
+                );
+              } catch (error) {
+                console.error('Lỗi khi reset notifications:', error);
+                Alert.alert(
+                  'Lỗi',
+                  'Không thể reset thông báo.',
+                  [{text: 'OK'}],
+                );
+              } finally {
+                setResetting(false);
+              }
+            },
+          },
+        ],
+      );
+    } catch (error) {
+      console.error('Lỗi khi reset notifications:', error);
+    }
+  };
+
   return (
     <>
       <View style={styles.header}>
@@ -82,14 +204,32 @@ export const HomeScreen: React.FC = () => {
         contentContainerStyle={styles.contentContainer}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}>
         {/* Active Alerts */}
-      {activeAlerts.length > 0 && (
-        <View style={styles.alertsSection}>
+      <View style={styles.alertsSection}>
+        <View style={styles.alertsHeader}>
           <Text style={styles.sectionTitle}>⚠️ Cảnh báo thời tiết</Text>
-          {activeAlerts.slice(0, 2).map(alert => (
-            <AlertCard key={alert.id} alert={alert} />
-          ))}
+          <View style={styles.buttonRow}>
+            <TouchableOpacity
+              style={[styles.testButton, testNotificationScheduled && styles.testButtonDisabled]}
+              onPress={handleTestNotification}
+              disabled={testNotificationScheduled}>
+              <Text style={styles.testButtonText}>
+                {testNotificationScheduled ? 'Đã lên lịch...' : '🔔 Test'}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.resetButton, resetting && styles.resetButtonDisabled]}
+              onPress={handleResetNotifications}
+              disabled={resetting}>
+              <Text style={styles.resetButtonText}>
+                {resetting ? 'Đang reset...' : '🔄 Reset'}
+              </Text>
+            </TouchableOpacity>
+          </View>
         </View>
-      )}
+        {activeAlerts.length > 0 && activeAlerts.slice(0, 2).map(alert => (
+          <AlertCard key={alert.id} alert={alert} />
+        ))}
+      </View>
 
       {/* Main Weather Card */}
       <WeatherCard
@@ -300,14 +440,64 @@ const styles = StyleSheet.create({
     marginTop: SPACING.md,
     marginBottom: SPACING.sm,
   },
+  alertsHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginHorizontal: SPACING.md,
+    marginBottom: SPACING.lg,
+    marginTop: SPACING.lg,
+  },
   sectionTitle: {
     fontSize: FONT_SIZE.xxxl,
     color: COLORS.text,
     fontWeight: '800',
-    marginHorizontal: SPACING.md,
-    marginBottom: SPACING.lg,
-    marginTop: SPACING.lg,
+    flex: 1,
     letterSpacing: -1.2,
+  },
+  buttonRow: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+  },
+  testButton: {
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    borderRadius: BORDER_RADIUS.md,
+    shadowColor: COLORS.primary,
+    shadowOffset: {width: 0, height: 2},
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  testButtonDisabled: {
+    backgroundColor: COLORS.textSecondary,
+    opacity: 0.6,
+  },
+  testButtonText: {
+    color: COLORS.textDark,
+    fontSize: FONT_SIZE.sm,
+    fontWeight: '600',
+  },
+  resetButton: {
+    backgroundColor: COLORS.error || '#FF3B30',
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    borderRadius: BORDER_RADIUS.md,
+    shadowColor: COLORS.error || '#FF3B30',
+    shadowOffset: {width: 0, height: 2},
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  resetButtonDisabled: {
+    backgroundColor: COLORS.textSecondary,
+    opacity: 0.6,
+  },
+  resetButtonText: {
+    color: COLORS.textDark,
+    fontSize: FONT_SIZE.sm,
+    fontWeight: '600',
   },
   statsContainer: {
     marginHorizontal: SPACING.md,
